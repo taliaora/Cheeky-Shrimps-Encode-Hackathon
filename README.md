@@ -1,4 +1,5 @@
 # 🦐 Cheeky Shrimps
+## Rebuild the coral reef, expand your knowledge. 
 
 An AI-powered interactive learning app that builds personalised knowledge graphs, generates flashcards and quizzes, tracks your weak spots, and recommends online resources (driven by a Groq LLM backend since that's the free version).
 
