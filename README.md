@@ -4,6 +4,9 @@ An AI-powered interactive learning app that builds personalised knowledge graphs
 
 Built at the Encode Hackathon 2026.
 
+<img width="2248" height="1300" alt="image" src="https://github.com/user-attachments/assets/28126c0c-1e34-46b7-8194-61776ad11385" />
+
+
 ---
 
 ## Features
