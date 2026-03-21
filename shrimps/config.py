@@ -220,7 +220,7 @@ Time to upgrade your shrimp intelligence.
 ### Your Mission
 
 1. **Pick a quest**  
-   Type something you want to learn — e.g. *"quaternions"*.
+   Type something you want to learn — e.g. *"Gauge theory"* or *"m6 RNA modifications"*.
 
 2. **Get your map**  
    We generate a concept web around your topic — your learning battlefield.
