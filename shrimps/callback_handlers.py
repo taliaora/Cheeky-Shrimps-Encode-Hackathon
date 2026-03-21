@@ -132,6 +132,8 @@ def _quiz_option_buttons(options: list[str]) -> list:
 
 def _rebuild_graph(state: dict, graph_key: int, **kwargs) -> tuple:
     """Rebuild cytoscape elements and return ``(graph_component, new_key)``."""
+    quiz_stats = StateManager.get_node_quiz_stats(state)
+    srs_due = StateManager.get_srs_due_nodes(state)
     elements = build_cytoscape_elements(
         state["node_data"],
         state["clicked_nodes_list"],
@@ -139,6 +141,8 @@ def _rebuild_graph(state: dict, graph_key: int, **kwargs) -> tuple:
         practiced=state.get("practiced_nodes", []),
         caught=state.get("caught_nodes", []),
         flashcards=state.get("flashcards", {}),
+        quiz_stats=quiz_stats,
+        srs_due=srs_due,
         **kwargs,
     )
     new_key = (graph_key or 0) + 1
@@ -153,9 +157,9 @@ def _graph_result(graph, new_key, state, *, overlay_hidden=False, flash=False):
     return [graph], no_update, not overlay_hidden, no_update, state, new_key, flash, None
 
 
-def _submit_new_concept(term: str, graph_key: int, *, flash: bool = False) -> list:
+def _submit_new_concept(term: str, graph_key: int, node_count: int = 4, *, flash: bool = False) -> list:
     """Create a fresh concept map and return the _GRAPH_OUTPUTS-sized result."""
-    new_state = StateManager.create_new_concept_map(term, "short")
+    new_state = StateManager.create_new_concept_map(term, "short", node_count)
     if not new_state:
         return [no_update] * _N_GRAPH
     graph, new_key = _rebuild_graph(new_state, graph_key)
@@ -171,14 +175,14 @@ def _load_from_upload(contents: str, graph_key: int) -> list:
     return [[graph], None, False, no_update, new_state, new_key, False, None]
 
 
-def _expand_node(tap_data: dict, state: dict, graph_key: int) -> list:
+def _expand_node(tap_data: dict, state: dict, graph_key: int, node_count: int = 3) -> list:
     """Expand the graph when an unvisited node is tapped."""
     node_id = tap_data.get("id", "")
     if not node_id or node_id == "start" or node_id.startswith("__emoji_"):
         return [no_update] * _N_GRAPH
     if node_id in state["clicked_nodes_list"]:
         return [no_update] * _N_GRAPH
-    new_state = StateManager.expand_concept_map(state, node_id)
+    new_state = StateManager.expand_concept_map(state, node_id, node_count)
     graph, new_key = _rebuild_graph(new_state, graph_key, node_flash=node_id, selected_node=node_id)
     return [[graph], no_update, False, no_update, new_state, new_key, False, None]
 
@@ -215,15 +219,24 @@ def _wire_reset(app):
          Output("reload-spinning", "data"),
          Output("reload-last-click", "data"),
          Output("reload-timer", "n_intervals"),
-         Output("explanation-length-flag", "data")],
+         Output("explanation-length-flag", "data"),
+         Output("weakness-report", "children", allow_duplicate=True),
+         Output("weakness-wrong-count", "children", allow_duplicate=True),
+         Output("resources-list", "children", allow_duplicate=True),
+         Output("post-quiz-summary", "children", allow_duplicate=True),
+         Output("srs-due-panel", "children", allow_duplicate=True)],
         Input("reset-term-btn", "n_clicks"),
         State("graph-key", "data"),
         prevent_initial_call=True,
     )
     def on_reset(_, graph_key):
-        state = StateManager.get_initial_state()
+        from shrimps.state_manager import save_session, blank_state
+        # Wipe persisted session first so get_initial_state loads clean
+        clean = blank_state()
+        save_session(clean)
+        state = clean
         graph, new_key = _rebuild_graph(state, graph_key or 0)
-        return [graph], None, True, "", state, new_key, False, None, False, False, False, False, 0, 0, "short"
+        return [graph], None, True, "", state, new_key, False, None, False, False, False, False, 0, 0, "short", "", "0", "", "", ""
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +244,39 @@ def _wire_reset(app):
 # ---------------------------------------------------------------------------
 
 def _wire_interactions(app):
+
+    @app.callback(
+        Output("doc-processing-toast", "style"),
+        Input("upload-document", "contents"),
+        prevent_initial_call=True,
+    )
+    def on_doc_upload_show_toast(contents):
+        if not contents:
+            return {"display": "none"}
+        return {
+            "display": "flex", "position": "fixed", "bottom": "32px",
+            "left": "50%", "transform": "translateX(-50%)",
+            "backgroundColor": "rgba(0,40,60,0.92)", "backdropFilter": "blur(12px)",
+            "border": "1px solid rgba(0,180,160,0.4)", "borderRadius": "40px",
+            "padding": "12px 28px", "color": "#ffffff", "fontSize": "0.95em",
+            "zIndex": 2000, "boxShadow": "0 8px 32px rgba(0,0,0,0.5)",
+            "alignItems": "center", "whiteSpace": "nowrap",
+        }
+
+    @app.callback(
+        Output("node-count-label", "children"),
+        Input("node-count-slider", "value"),
+    )
+    def on_node_count_change(value):
+        return str(value or 4)
+
+    @app.callback(
+        Output("node-count", "data"),
+        Input("node-count-slider", "value"),
+        prevent_initial_call=True,
+    )
+    def on_node_count_store(value):
+        return value or 4
 
     @app.callback(
         _GRAPH_OUTPUTS + [Output("selected-node", "data", allow_duplicate=True)],
@@ -242,19 +288,21 @@ def _wire_interactions(app):
          State("app-state-store", "data"),
          State("graph-key", "data"),
          State("explanation-length-flag", "data"),
-         State("trim-mode", "data")],
+         State("trim-mode", "data"),
+         State("node-count", "data")],
         prevent_initial_call=True,
     )
     def on_main_interaction(tap_list, _n_submit, upload_contents, _n_clicks,
-                            user_input, state, graph_key, _length_flag, trim_mode):
+                            user_input, state, graph_key, _length_flag, trim_mode, node_count):
         trigger = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
         tap_data = next((d for d in tap_list if d), None)
+        count = node_count or 4
 
         if trigger == "upload-graph" and upload_contents:
             return _load_from_upload(upload_contents, graph_key) + [no_update]
 
         if trigger in ("start-input", "submit-btn") and user_input:
-            return _submit_new_concept(user_input.strip(), graph_key) + [None]
+            return _submit_new_concept(user_input.strip(), graph_key, count) + [None]
 
         if tap_data:
             node_id = tap_data.get("id", "")
@@ -265,7 +313,7 @@ def _wire_interactions(app):
                     graph, new_key = _rebuild_graph(new_state, graph_key)
                     return [[graph], no_update, no_update, no_update, new_state, new_key, no_update, no_update, None]
 
-                result = _expand_node(tap_data, state, graph_key)
+                result = _expand_node(tap_data, state, graph_key, count)
                 if result[0] is not no_update:
                     return result + [node_id]
 
@@ -281,17 +329,77 @@ def _wire_interactions(app):
         [State({"type": "suggested-term", "term": ALL}, "id"),
          State("app-state-store", "data"),
          State("graph-key", "data"),
-         State("explanation-length-flag", "data")],
+         State("explanation-length-flag", "data"),
+         State("node-count", "data")],
         prevent_initial_call=True,
     )
-    def on_suggestion_click(all_clicks, all_ids, state, graph_key, _length_flag):
+    def on_suggestion_click(all_clicks, all_ids, state, graph_key, _length_flag, node_count):
         if not ctx.triggered or not all_clicks or not all_ids:
             return [no_update] * (_N_GRAPH + 1)
         clicked_idx = next((i for i, n in enumerate(all_clicks) if n and n > 0), None)
         if clicked_idx is None:
             return [no_update] * (_N_GRAPH + 1)
         term = all_ids[clicked_idx]["term"]
-        return _submit_new_concept(term, graph_key, flash=True) + ["short"]
+        return _submit_new_concept(term, graph_key, node_count or 4, flash=True) + ["short"]
+
+    @app.callback(
+        _GRAPH_OUTPUTS + [Output("explanation-length-flag", "data", allow_duplicate=True),
+                          Output("doc-processing-toast", "style", allow_duplicate=True)],
+        Input("upload-document", "contents"),
+        State("graph-key", "data"),
+        prevent_initial_call=True,
+    )
+    def on_document_upload(contents, graph_key):
+        import base64 as b64
+        import io
+        n_out = _N_GRAPH + 2
+        _toast_hidden = {"display": "none"}
+        _toast_shown  = {"display": "flex", "position": "fixed", "bottom": "32px",
+                         "left": "50%", "transform": "translateX(-50%)",
+                         "backgroundColor": "rgba(0,40,60,0.92)", "backdropFilter": "blur(12px)",
+                         "border": "1px solid rgba(0,180,160,0.4)", "borderRadius": "40px",
+                         "padding": "12px 28px", "color": "#ffffff", "fontSize": "0.95em",
+                         "zIndex": 2000, "boxShadow": "0 8px 32px rgba(0,0,0,0.5)",
+                         "alignItems": "center", "whiteSpace": "nowrap"}
+        if not contents:
+            return [no_update] * n_out
+        try:
+            header, encoded = contents.split(",", 1)
+            raw = b64.b64decode(encoded)
+        except Exception as e:
+            print(f"[Doc upload] decode error: {e}")
+            return [no_update] * n_out
+
+        # Detect PDF by magic bytes
+        if raw[:4] == b"%PDF":
+            try:
+                import pypdf
+                reader = pypdf.PdfReader(io.BytesIO(raw))
+                text = "\n".join(
+                    page.extract_text() or "" for page in reader.pages
+                )
+                print(f"[Doc upload] extracted {len(text)} chars from {len(reader.pages)}-page PDF")
+            except Exception as e:
+                print(f"[Doc upload] PDF extraction error: {e}")
+                return [no_update] * n_out
+        else:
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                text = raw.decode("latin-1", errors="replace")
+
+        if not text.strip():
+            print("[Doc upload] empty document after extraction")
+            return [no_update] * n_out
+
+        print(f"[Doc upload] processing {len(text)} chars")
+        new_state = StateManager.create_concept_map_from_text(text)
+        if not new_state:
+            print("[Doc upload] LLM returned no usable concept map")
+            return [no_update] * (_N_GRAPH) + ["short", _toast_hidden]
+
+        graph, new_key = _rebuild_graph(new_state, graph_key)
+        return [[graph], no_update, False, no_update, new_state, new_key, False, None, "short", _toast_hidden]
 
 
 # ---------------------------------------------------------------------------
@@ -445,11 +553,23 @@ def _wire_display(app):
         )
 
     @app.callback(
-        Output("suggested-concepts-container", "children"),
-        Input("app-state-store", "data"),
+        [Output("suggested-concepts-container", "children"),
+         Output("suggestions-timer", "disabled")],
+        Input("suggestions-timer", "n_intervals"),
+        State("app-state-store", "data"),
+        prevent_initial_call=True,
     )
-    def on_suggestions_update(state):
-        return suggested_concepts(StateManager.get_suggested_concepts(state))
+    def on_suggestions_update(_n, state):
+        return suggested_concepts(StateManager.get_suggested_concepts(state)), True
+
+    @app.callback(
+        Output("suggestions-timer", "disabled", allow_duplicate=True),
+        Input("app-state-store", "data"),
+        prevent_initial_call=True,
+    )
+    def on_state_changed_trigger_suggestions(_state):
+        # Re-arm the timer so suggestions load ~300ms after the graph renders
+        return False
 
     @app.callback(
         [Output("centered-input-overlay", "style"),
@@ -661,18 +781,21 @@ def _wire_flashcards(app):
          Output("quiz-streak", "data"),
          Output("quiz-score-display", "children"),
          Output("quiz-streak-display", "children"),
-         Output("quiz-answered", "data")],
+         Output("quiz-answered", "data"),
+         Output("app-state-store", "data", allow_duplicate=True)],
         Input({"type": "quiz-option", "index": ALL}, "n_clicks"),
         [State({"type": "quiz-option", "index": ALL}, "children"),
          State("quiz-data", "data"),
          State("quiz-index", "data"),
          State("quiz-score", "data"),
          State("quiz-streak", "data"),
-         State("quiz-answered", "data")],
+         State("quiz-answered", "data"),
+         State("app-state-store", "data"),
+         State("selected-node", "data")],
         prevent_initial_call=True,
     )
-    def on_quiz_answer(all_clicks, all_labels, quiz, idx, score, streak, already_answered):
-        n_out = 6
+    def on_quiz_answer(all_clicks, all_labels, quiz, idx, score, streak, already_answered, state, node):
+        n_out = 7
         if not quiz or not ctx.triggered or already_answered:
             return [no_update] * n_out
         if not any(c for c in all_clicks if c):
@@ -682,17 +805,22 @@ def _wire_flashcards(app):
         except (KeyError, ValueError, json.JSONDecodeError):
             return [no_update] * n_out
         chosen = all_labels[btn_idx]
-        correct = quiz[idx % len(quiz)]["answer"]
-        if chosen == correct:
+        q_entry = quiz[idx % len(quiz)]
+        correct = q_entry["answer"]
+        was_correct = chosen == correct
+        new_state = StateManager.record_quiz_answer(
+            state or {}, node or "unknown", q_entry["q"], correct, chosen, was_correct
+        )
+        if was_correct:
             new_streak = streak + 1
             bonus = 5 if new_streak >= 3 else 0
             pts = 10 + bonus
             new_score = score + pts
             streak_msg = f"🔥 {new_streak} streak! +{bonus} bonus" if new_streak >= 3 else ""
             msg = f"✅ +{pts} pts!" + (f"  {streak_msg}" if streak_msg else "")
-            return html.Span(msg, style={"color": "#06d6a0", "fontWeight": "600"}), new_score, new_streak, str(new_score), streak_msg, True
+            return html.Span(msg, style={"color": "#06d6a0", "fontWeight": "600"}), new_score, new_streak, str(new_score), streak_msg, True, new_state
         new_score = max(0, score - 5)
-        return html.Span(f"❌ -5 pts — correct: {correct}", style={"color": "#ff6b6b", "fontWeight": "600"}), new_score, 0, str(new_score), "", True
+        return html.Span(f"❌ -5 pts — correct: {correct}", style={"color": "#ff6b6b", "fontWeight": "600"}), new_score, 0, str(new_score), "", True, new_state
 
     # ── Advance to next quiz question ────────────────────────────────────
     @app.callback(
@@ -701,17 +829,19 @@ def _wire_flashcards(app):
          Output("quiz-options", "children", allow_duplicate=True),
          Output("quiz-feedback", "children", allow_duplicate=True),
          Output("quiz-counter", "children", allow_duplicate=True),
-         Output("quiz-answered", "data", allow_duplicate=True)],
+         Output("quiz-answered", "data", allow_duplicate=True),
+         Output("quiz-session-complete", "data", allow_duplicate=True)],
         Input("quiz-next-btn", "n_clicks"),
         [State("quiz-data", "data"), State("quiz-index", "data")],
         prevent_initial_call=True,
     )
     def on_quiz_next(n_clicks, quiz, idx):
         if not n_clicks or not quiz:
-            return [no_update] * 6
+            return [no_update] * 7
         new_idx = (idx + 1) % len(quiz)
+        is_last_wrap = new_idx == 0  # wrapped back to start = session complete
         q = quiz[new_idx]
-        return new_idx, q["q"], _quiz_option_buttons(q["options"]), "", f"{new_idx + 1} / {len(quiz)}", False
+        return new_idx, q["q"], _quiz_option_buttons(q["options"]), "", f"{new_idx + 1} / {len(quiz)}", False, is_last_wrap
 
     # ── Saved flashcards panel ───────────────────────────────────────────
     @app.callback(
@@ -790,6 +920,197 @@ def _wire_flashcards(app):
 
 
 # ---------------------------------------------------------------------------
+# Weakness agent
+# ---------------------------------------------------------------------------
+
+def _wire_weakness_agent(app) -> None:
+    """Wire the weakness-tracking agent panel."""
+
+    @app.callback(
+        [Output("weakness-report", "children"),
+         Output("weakness-report-loading", "style")],
+        Input("weakness-analyse-btn", "n_clicks"),
+        State("app-state-store", "data"),
+        prevent_initial_call=True,
+    )
+    def on_analyse_weaknesses(n_clicks, state):
+        if not n_clicks or not state:
+            return no_update, no_update
+        report = StateManager.get_weakness_report(state)
+        return (
+            html.Div(report, style={"whiteSpace": "pre-wrap", "lineHeight": "1.6", "fontSize": "0.88em"}),
+            {"display": "none"},
+        )
+
+    @app.callback(
+        Output("weakness-report-loading", "style", allow_duplicate=True),
+        Input("weakness-analyse-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def on_analyse_start(n_clicks):
+        if not n_clicks:
+            return no_update
+        return {"display": "block", "color": "rgba(255,180,80,0.8)", "fontSize": "0.82em", "marginTop": "6px"}
+
+    @app.callback(
+        [Output("resources-list", "children"),
+         Output("resources-loading", "style")],
+        Input("resources-btn", "n_clicks"),
+        State("app-state-store", "data"),
+        prevent_initial_call=True,
+    )
+    def on_get_resources(n_clicks, state):
+        if not n_clicks or not state:
+            return no_update, no_update
+        recs = StateManager.get_resource_recommendations(state)
+        if not recs:
+            return html.Div("No mistakes to base recommendations on yet.",
+                            style={"color": "rgba(255,255,255,0.4)", "fontSize": "0.82em"}), {"display": "none"}
+
+        import urllib.parse
+
+        _url_builders = {
+            "YouTube":              lambda q: f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(q)}",
+            "Khan Academy":         lambda q: f"https://www.khanacademy.org/search?page_search_query={urllib.parse.quote_plus(q)}",
+            "Wikipedia":            lambda q: f"https://en.wikipedia.org/wiki/Special:Search?search={urllib.parse.quote_plus(q)}",
+            "arXiv":                lambda q: f"https://arxiv.org/search/?searchtype=all&query={urllib.parse.quote_plus(q)}",
+            "Coursera":             lambda q: f"https://www.coursera.org/search?query={urllib.parse.quote_plus(q)}",
+            "MIT OpenCourseWare":   lambda q: f"https://ocw.mit.edu/search/?q={urllib.parse.quote_plus(q)}",
+        }
+        _type_icons = {
+            "YouTube": "▶",
+            "Khan Academy": "🎓",
+            "Wikipedia": "📖",
+            "arXiv": "📄",
+            "Coursera": "🎓",
+            "MIT OpenCourseWare": "🏛",
+        }
+        _type_colors = {
+            "YouTube": "#ff6b6b",
+            "Khan Academy": "#06d6a0",
+            "Wikipedia": "#a8dadc",
+            "arXiv": "#ffd166",
+            "Coursera": "#48cae4",
+            "MIT OpenCourseWare": "#ffb347",
+        }
+
+        cards = []
+        for r in recs:
+            platform = r["type"]
+            query = r["title"]
+            reason = r["reason"]
+            icon = _type_icons.get(platform, "🔗")
+            color = _type_colors.get(platform, "#a8dadc")
+            url_fn = _url_builders.get(platform)
+            url = url_fn(query) if url_fn else f"https://www.google.com/search?q={urllib.parse.quote_plus(query)}"
+
+            cards.append(
+                html.A(
+                    href=url,
+                    target="_blank",
+                    rel="noopener noreferrer",
+                    style={"textDecoration": "none"},
+                    children=html.Div([
+                        html.Div([
+                            html.Span(icon + " ", style={"color": color}),
+                            html.Span(platform, style={
+                                "color": color, "fontWeight": "700", "fontSize": "0.75em",
+                                "textTransform": "uppercase", "letterSpacing": "0.05em",
+                            }),
+                            html.Span(" ↗", style={"color": color, "fontSize": "0.75em", "marginLeft": "4px"}),
+                        ], style={"marginBottom": "3px"}),
+                        html.Div(query, style={
+                            "fontWeight": "600", "fontSize": "0.88em",
+                            "color": "rgba(255,255,255,0.95)", "marginBottom": "3px",
+                        }),
+                        html.Div(reason, style={
+                            "fontSize": "0.8em", "color": "rgba(255,255,255,0.55)", "lineHeight": "1.4",
+                        }),
+                    ], style={
+                        "padding": "10px 12px", "marginBottom": "8px", "borderRadius": "10px",
+                        "backgroundColor": "rgba(0,40,60,0.6)",
+                        "border": f"1px solid {color}55",
+                        "cursor": "pointer",
+                        "transition": "border-color 0.2s ease, background-color 0.2s ease",
+                    }),
+                )
+            )
+
+        return cards, {"display": "none"}
+
+    @app.callback(
+        Output("resources-loading", "style", allow_duplicate=True),
+        Input("resources-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def on_resources_start(n_clicks):
+        if not n_clicks:
+            return no_update
+        return {"display": "block", "color": "rgba(255,180,80,0.8)", "fontSize": "0.82em", "marginTop": "6px"}
+
+    @app.callback(
+        Output("weakness-wrong-count", "children"),
+        Input("app-state-store", "data"),
+        prevent_initial_call=True,
+    )
+    def on_wrong_count_update(state):
+        if not state:
+            return "0"
+        wrong = sum(1 for e in state.get("quiz_history", []) if not e["was_correct"])
+        return str(wrong)
+
+    @app.callback(
+        Output("srs-due-panel", "children"),
+        Input("app-state-store", "data"),
+        prevent_initial_call=True,
+    )
+    def on_srs_due_update(state):
+        if not state:
+            return ""
+        due = StateManager.get_srs_due_nodes(state)
+        if not due:
+            return ""
+        chips = [
+            html.Span(node, style={
+                "backgroundColor": "rgba(255,255,255,0.1)",
+                "border": "1px dotted #ffffff",
+                "borderRadius": "12px",
+                "padding": "2px 10px",
+                "fontSize": "0.78em",
+                "marginRight": "4px",
+                "marginBottom": "4px",
+                "display": "inline-block",
+            }) for node in due[:5]
+        ]
+        return html.Div([
+            html.Div("🔔 Due for review:", style={"fontSize": "0.78em", "color": "rgba(255,255,255,0.5)", "marginBottom": "4px"}),
+            html.Div(chips, style={"flexWrap": "wrap"}),
+        ])
+
+    @app.callback(
+        Output("post-quiz-summary", "children"),
+        Input("quiz-session-complete", "data"),
+        State("app-state-store", "data"),
+        prevent_initial_call=True,
+    )
+    def on_post_quiz_summary(complete, state):
+        if not complete or not state:
+            return ""
+        wrong = [e for e in state.get("quiz_history", []) if not e["was_correct"]]
+        if not wrong:
+            return html.Div("✅ Perfect session — no mistakes!", style={
+                "color": "#06d6a0", "fontSize": "0.82em", "padding": "6px 0",
+            })
+        # Show a quick inline summary without a full LLM call
+        nodes = list({e["node"] for e in wrong[-5:]})
+        return html.Div([
+            html.Span("⚠️ Struggled with: ", style={"color": "#ffd166", "fontSize": "0.82em", "fontWeight": "600"}),
+            html.Span(", ".join(nodes), style={"color": "rgba(255,255,255,0.8)", "fontSize": "0.82em"}),
+            html.Span(" — click Analyse for details", style={"color": "rgba(255,255,255,0.4)", "fontSize": "0.78em"}),
+        ], style={"padding": "6px 0"})
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -801,6 +1122,7 @@ def attach(app) -> None:
     _wire_animations(app)
     _wire_display(app)
     _wire_flashcards(app)
+    _wire_weakness_agent(app)
 
 
 # ---------------------------------------------------------------------------

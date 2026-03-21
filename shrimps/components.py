@@ -167,8 +167,11 @@ def build_state_stores(initial_state: dict[str, Any]) -> list:
         ("fc-keep-confirm", False),
         ("trim-mode", False),
         ("quiz-selected-cards", []),
+        ("quiz-session-complete", False),
+        ("node-count", 4),
     ]
-    return [dcc.Store(id=store_id, data=value) for store_id, value in store_defaults]
+    stores = [dcc.Store(id=store_id, data=value) for store_id, value in store_defaults]
+    return stores
 
 
 def build_timers() -> list:
@@ -176,6 +179,13 @@ def build_timers() -> list:
         dcc.Interval(
             id="reload-timer",
             interval=TIMING["reload_timer_interval"],
+            n_intervals=0,
+            disabled=True,
+            max_intervals=1,
+        ),
+        dcc.Interval(
+            id="suggestions-timer",
+            interval=300,   # fire 300 ms after being armed
             n_intervals=0,
             disabled=True,
             max_intervals=1,
@@ -420,9 +430,48 @@ def build_info_panel(children):
     )
 
 
+def build_weakness_panel():
+    """Weakness-tracking agent panel shown below the info box."""
+    card_style = {**THEME.layout["glass_card"], "marginTop": "16px", "width": "350px", "maxWidth": "350px", "minWidth": "350px"}
+    btn_style = _merge(_toolbar_button_style(), {"width": "100%", "marginTop": "8px", "textAlign": "center"})
+    divider = {"borderTop": "1px solid rgba(255,255,255,0.1)", "margin": "14px 0"}
+    return html.Div([
+        # Header with wrong count
+        html.Div([
+            html.Span("🎯 Weak Spots", style={"fontWeight": "700", "fontSize": "0.95em"}),
+            html.Span([
+                html.Span(" · ", style={"color": "rgba(255,255,255,0.3)"}),
+                html.Span(id="weakness-wrong-count", children="0",
+                          style={"color": "#ff6b6b", "fontWeight": "700"}),
+                html.Span(" wrong", style={"color": "rgba(255,255,255,0.5)", "fontSize": "0.82em"}),
+            ]),
+        ], style={"display": "flex", "alignItems": "center", "gap": "4px", "marginBottom": "10px"}),
+
+        # SRS due nodes
+        html.Div(id="srs-due-panel", style={"marginBottom": "8px"}),
+
+        # Proactive post-quiz summary (auto-populated)
+        html.Div(id="post-quiz-summary", style={"marginBottom": "4px"}),
+
+        # Analyse mistakes
+        html.Button("Analyse my mistakes", id="weakness-analyse-btn", n_clicks=0, style=btn_style),
+        html.Div("⏳ Analysing...", id="weakness-report-loading", style={"display": "none"}),
+        html.Div(id="weakness-report", style={"marginTop": "10px", "color": "rgba(255,255,255,0.85)"}),
+
+        # Divider
+        html.Hr(style=divider),
+
+        # Resource recommender
+        html.Div("📚 Resources", style={"fontWeight": "700", "fontSize": "0.9em", "marginBottom": "8px"}),
+        html.Button("Find resources for my gaps", id="resources-btn", n_clicks=0, style=btn_style),
+        html.Div("⏳ Finding resources...", id="resources-loading", style={"display": "none"}),
+        html.Div(id="resources-list", style={"marginTop": "10px"}),
+    ], style=card_style)
+
+
 def build_sidebar(control_block, info_block):
     return html.Div(
-        [control_block, info_block],
+        [control_block, info_block, build_weakness_panel()],
         style=THEME.layout["side_column"],
     )
 
@@ -431,9 +480,35 @@ def build_sidebar(control_block, info_block):
 # ---------------------------------------------------------------------------
 
 def build_center_input_overlay():
+    slider = html.Div(
+        [
+            html.Div(
+                [
+                    html.Span("Nodes per click:", style={
+                        "color": "rgba(255,255,255,0.6)", "fontSize": "0.78em",
+                        "whiteSpace": "nowrap",
+                    }),
+                    html.Span(id="node-count-label", children="4", style={
+                        "color": "#ff8c35", "fontWeight": "700", "fontSize": "0.85em",
+                        "minWidth": "1.2em", "textAlign": "center",
+                    }),
+                ],
+                style={"display": "flex", "justifyContent": "space-between",
+                       "alignItems": "center", "marginBottom": "4px"},
+            ),
+            dcc.Slider(
+                id="node-count-slider",
+                min=2, max=8, step=1, value=4,
+                marks={i: str(i) for i in range(2, 9)},
+                tooltip={"always_visible": False},
+                updatemode="drag",
+            ),
+        ],
+        style={"width": "100%", "marginTop": "12px", "padding": "0 4px"},
+    )
     inner = html.Div(
-        [build_text_input(), build_submit_button()],
-        style=THEME.overlay["center_prompt_inner"],
+        [build_text_input(), build_submit_button(), slider],
+        style={**THEME.overlay["center_prompt_inner"], "flexDirection": "column", "alignItems": "stretch"},
     )
     return html.Div(
         inner,
@@ -453,12 +528,19 @@ def build_control_strip():
                 children=build_standard_button("Load", "upload-load-btn"),
                 multiple=False,
             ),
+            dcc.Upload(
+                id="upload-document",
+                children=build_standard_button("📄 Doc", "upload-doc-btn"),
+                multiple=False,
+                accept=".txt,.md,.pdf",
+            ),
         ],
         style={
             "marginBottom": "16px",
             "display": "flex",
             "gap": "10px",
             "justifyContent": "center",
+            "flexWrap": "wrap",
         },
     )
 
@@ -664,6 +746,35 @@ def build_node_toolbar():
 # Final page assembly
 # ---------------------------------------------------------------------------
 
+def build_doc_toast():
+    """Floating notification shown while a document is being processed."""
+    return html.Div(
+        [
+            html.Span("⏳", style={"fontSize": "1.2em", "marginRight": "10px"}),
+            html.Span("Analysing document and building graph…", style={"fontWeight": "500"}),
+        ],
+        id="doc-processing-toast",
+        style={
+            "display": "none",
+            "position": "fixed",
+            "bottom": "32px",
+            "left": "50%",
+            "transform": "translateX(-50%)",
+            "backgroundColor": "rgba(0,40,60,0.92)",
+            "backdropFilter": "blur(12px)",
+            "border": "1px solid rgba(0,180,160,0.4)",
+            "borderRadius": "40px",
+            "padding": "12px 28px",
+            "color": "#ffffff",
+            "fontSize": "0.95em",
+            "zIndex": 2000,
+            "boxShadow": "0 8px 32px rgba(0,0,0,0.5)",
+            "alignItems": "center",
+            "whiteSpace": "nowrap",
+        },
+    )
+
+
 def build_main_layout(graph_region, sidebar_region):
     return html.Div(
         [
@@ -672,6 +783,7 @@ def build_main_layout(graph_region, sidebar_region):
             html.Div(id="loading-output", style={"display": "none"}),
             html.Div([graph_region, sidebar_region], style=THEME.layout["content"]),
             build_flashcard_modal(),
+            build_doc_toast(),
         ],
         style=THEME.layout["page"],
     )

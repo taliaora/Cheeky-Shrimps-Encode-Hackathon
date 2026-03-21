@@ -434,6 +434,21 @@ HTML_PAGE = """<!DOCTYPE html>
 </html>""".format(styles=PAGE_CSS)
 
 
+GRAPH_CONFIG = {
+    "base_spacing":        SETTINGS["learning_map"]["spacing"],
+    "target_radius":       SETTINGS["learning_map"]["radius_limit"],
+    "force_layout": {
+        "iterations": SETTINGS["learning_map"]["physics"]["iterations"],
+        "k_attract":  SETTINGS["learning_map"]["physics"]["attraction"],
+        "k_repel":    SETTINGS["learning_map"]["physics"]["repulsion"],
+    },
+    "root_size_base":      SETTINGS["learning_map"]["sizes"]["root_default"],
+    "root_size_min":       SETTINGS["learning_map"]["sizes"]["root_floor"],
+    "node_size_base":      SETTINGS["learning_map"]["sizes"]["node_default"],
+    "node_size_multiplier": SETTINGS["learning_map"]["sizes"]["node_breadth_bonus"],
+}
+
+
 def app_title() -> str:
     return SETTINGS["app"]["title"]
 

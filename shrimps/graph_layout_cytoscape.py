@@ -8,10 +8,10 @@ from shrimps.graph_layout import GraphManager  # reuse position logic
 
 # Coral reef emojis to scatter along edges
 CORAL_EMOJIS = ["🪸", "🪸", "🪸", "🪸", "🪸", "🪸", "🪸", "🪸"]
-EMOJI_STEPS = 7  # number of emoji nodes per edge
+EMOJI_STEPS = 0  # number of emoji nodes per edge
 
 
-def _node_class(node, node_data, clicked_nodes_set, last_clicked, node_flash, practiced, caught, selected_node=None, has_flashcards=False):
+def _node_class(node, node_data, clicked_nodes_set, last_clicked, node_flash, practiced, caught, selected_node=None, has_flashcards=False, quiz_stats=None, srs_due=None):
     base = ""
     if node == "start":
         base = "reef-root"
@@ -29,16 +29,37 @@ def _node_class(node, node_data, clicked_nodes_set, last_clicked, node_flash, pr
         base = "reef-visited"
     else:
         base = "reef-unvisited"
+
+    classes = base
+
+    # Quiz performance overlay
+    if quiz_stats and node in quiz_stats and node != "start":
+        stats = quiz_stats[node]
+        total = stats["correct"] + stats["wrong"]
+        if total > 0:
+            ratio = stats["correct"] / total
+            if ratio >= 0.8:
+                classes += " quiz-strong"
+            elif ratio <= 0.4:
+                classes += " quiz-weak"
+            else:
+                classes += " quiz-shaky"
+
     if has_flashcards and node != "start":
-        return base + " reef-has-flashcards"
-    return base
+        classes += " reef-has-flashcards"
+
+    if srs_due and node in srs_due:
+        classes += " srs-due"
+
+    return classes
 
 
-def build_cytoscape_elements(node_data, clicked_nodes_list, last_clicked="start", node_flash=None, practiced=None, caught=None, flashcards=None, selected_node=None):
+def build_cytoscape_elements(node_data, clicked_nodes_list, last_clicked="start", node_flash=None, practiced=None, caught=None, flashcards=None, selected_node=None, quiz_stats=None, srs_due=None):
     """Convert node_data dict into Cytoscape elements — emoji chains replace edges."""
     clicked_nodes_set = set(clicked_nodes_list)
     practiced = set(practiced or [])
     caught = set(caught or [])
+    srs_due_set = set(srs_due or [])
 
     positions = GraphManager.build_node_positions(node_data, focus_node=last_clicked or "start")
     positions = GraphManager.apply_force_directed_layout(positions, node_data)
@@ -54,7 +75,9 @@ def build_cytoscape_elements(node_data, clicked_nodes_list, last_clicked="start"
     for node, (x, y) in positions.items():
         label = node_data[node].get("label", node) if node == "start" else node
         has_fc = node in (flashcards or {})
-        cls = _node_class(node, node_data, clicked_nodes_set, last_clicked, node_flash, practiced, caught, selected_node=selected_node, has_flashcards=has_fc)
+        cls = _node_class(node, node_data, clicked_nodes_set, last_clicked, node_flash, practiced, caught,
+                          selected_node=selected_node, has_flashcards=has_fc,
+                          quiz_stats=quiz_stats, srs_due=srs_due_set)
         elements.append({
             "data": {"id": node, "label": label},
             "position": {
@@ -362,6 +385,40 @@ CYTOSCAPE_STYLESHEET = [
         "style": {
             "border-color": "rgba(255,180,80,0.9)",
             "border-width": "3px",
+        }
+    },
+    # ── Quiz performance overlays ───────────────────────────────────────────
+    {
+        "selector": ".quiz-strong",
+        "style": {
+            "border-color": "#00e676",
+            "border-width": "3px",
+            "border-style": "solid",
+        }
+    },
+    {
+        "selector": ".quiz-shaky",
+        "style": {
+            "border-color": "#ffd740",
+            "border-width": "3px",
+            "border-style": "dashed",
+        }
+    },
+    {
+        "selector": ".quiz-weak",
+        "style": {
+            "border-color": "#ff1744",
+            "border-width": "3px",
+            "border-style": "dashed",
+        }
+    },
+    # ── SRS due — pulsing white ring ────────────────────────────────────────
+    {
+        "selector": ".srs-due",
+        "style": {
+            "border-color": "#ffffff",
+            "border-width": "3px",
+            "border-style": "dotted",
         }
     },
     # ── Edges — hidden connectors ───────────────────────────────────────────
