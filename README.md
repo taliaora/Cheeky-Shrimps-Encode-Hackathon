@@ -1,6 +1,6 @@
 # 🦐 Cheeky Shrimps
 
-An AI-powered interactive learning app that builds personalised knowledge graphs, generates flashcards and quizzes, tracks your weak spots, and recommends online resources — all driven by a Groq LLM backend.
+An AI-powered interactive learning app that builds personalised knowledge graphs, generates flashcards and quizzes, tracks your weak spots, and recommends online resources (driven by a Groq LLM backend since that's the free version).
 
 Built at the Encode Hackathon 2026.
 
