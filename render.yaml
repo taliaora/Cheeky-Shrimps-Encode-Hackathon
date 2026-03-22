@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: cheeky-shrimps
+    runtime: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn shrimps.app:server --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.1-8b-instant
+      - key: GROQ_STRONG_MODEL
+        value: llama-3.3-70b-versatile
+    healthCheckPath: /
