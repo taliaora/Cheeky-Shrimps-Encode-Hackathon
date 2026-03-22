@@ -39,7 +39,13 @@ def create_dash_app() -> dash.Dash:
     Returns:
         A fully configured Dash app.
     """
-    app = dash.Dash(__name__, suppress_callback_exceptions=True)
+    app = dash.Dash(
+        __name__,
+        suppress_callback_exceptions=True,
+        external_stylesheets=[
+            "https://cdnjs.cloudflare.com/ajax/libs/rc-slider/10.6.2/assets/index.min.css",
+        ],
+    )
     app.enable_dev_tools(
         debug=False,
         dev_tools_hot_reload=False,
